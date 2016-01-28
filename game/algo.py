@@ -33,7 +33,7 @@ class FaceDetector(object):
         # mearge overlapping windows since multiple windows will find the same face
         face_cascade = cv2.CascadeClassifier(r'..\notebooks\haarcascade_frontalface_default.xml')
         rects = face_cascade.detectMultiScale(img,
-                                      minSize=(64,64), # Smallest window
+                                      minSize=(16,16), # Smallest window
                                       maxSize=(180, 180), # Largest window
                                       scaleFactor=1.1, # Step between windows
                                       minNeighbors=1) # how many neighbors each candidate rectangle should have
@@ -120,10 +120,22 @@ class SkinDetector(object):
         :return:
         """
         masked_img = self.skin_mask(img, det_face_hsv, face_rect)
+        # do a bitwise and with the foreground mask
         blob_img = self.skin_blobs(img, det_face_hsv, face_rect, masked_img)
         contours, hierarchy = cv2.findContours(np.copy(blob_img), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = self.large_contours(contours, 3) #return the n largest contours up to 6
+        color_img, angles = self.color_contours(blob_img, contours)
 
+        _ = cv2.drawContours(blob_img, contours, -1, (128), 3)
+        return masked_img, blob_img, color_img, angles
+
+    def color_contours(self, blob_img, contours):
+        """
+        Return a colored image where the regions within certain the contours
+        is colored in.
+        :param blob_image:
+        :return:
+        """
         labeled_img = np.zeros(blob_img.shape + (3, ), np.uint8)
         colors = ((0,0,255),(0,255,0),(255,0,0),(0,255,255),(255,0,255), (255, 255, 0))
         pnts_list = []
@@ -137,21 +149,65 @@ class SkinDetector(object):
             pnts_list.append(pixel_points)
             mask_list.append(mask)
 
-        _ = cv2.drawContours(blob_img, contours, -1, (128), 3)
-        return masked_img, blob_img, labeled_img
+        k = 0
+        angles = []
+        for cnt in contours:
+            if len(cnt) < 10:
+                #don't care about tiny contours
+                # this should have already been protected for in the
+                # large_contour code, but that is technically area
+                angles.append(0)
+                continue
+
+            pixel_points = pnts_list[k]
+            M = cv2.moments(cnt)#expects to get a contour - uses Green's theorem
+
+            #center of blob
+            cx = int(M['m10']/M['m00'])
+            cy = int(M['m01']/M['m00'])
+
+            #ellipsoid outline of blob
+            ellipse = cv2.fitEllipse(cnt)
+
+            (x, y), (MA, ma), angle = cv2.fitEllipse(pixel_points)#yet another way to get the angle
+            angles.append(angle)
+
+            #line fitting, THIS WAS SLOWING ME DOWN
+            #DIST_L1 = 1: |x1-x2| + |y1-y2| */, DIST_L2 = 2: euclidean distance, DIST_C = : max(|x1-x2|,|y1-y2|)
+            [vx, vy, x, y] = cv2.fitLine(pixel_points, 1, 0, 0.01, 0.01)
+            pt1 = (np.array((x, y)) + 20*np.array((vx, vy))).astype('int32')
+            pt2 = (np.array((x, y)) - 20*np.array((vx, vy))).astype('int32')
+            cv2.line(labeled_img, tuple(pt1), tuple(pt2), (0, 128, 128), 2, 8)
+            k += 1
+
+        return labeled_img, angles
+
+    def major_axes(self, contours):
+        """
+        Calculate teh Major axes and the angles they are at
+        :param contours:
+        :return:
+        """
 
     def large_contours(self, contours, n=5):
         """
-        Return the n largest contours from mmy skin detection
+        Return the n largest contours from my skin detection.
+        Don't send back overly small contours cuz it will cause an error
         :param contours:
-        :param n:  up to 8
+        :param n:  up to 6
         :return:
         """
         #calculate the area of the contours, and select the 5 largest blobs
-        area = []
+        areas = []
         for i, countour in enumerate(contours):
-            area.append(cv2.moments(countour)['m00'])
-        return [contours[area.index(i)] for i in heapq.nlargest(n, area)]
+            area = cv2.moments(countour)['m00']
+            if area > 10:
+                areas.append(area)
+        if len(areas) < n:
+            # we have less than n contours of the min size
+            return [contours[areas.index(i)] for i in heapq.nlargest(len(areas), areas)]
+        else:
+            return [contours[areas.index(i)] for i in heapq.nlargest(n, areas)]
 
 
     def skin_blobs(self, img, det_face_hsv, face_rect, masked_img):
@@ -223,6 +279,7 @@ class ForegroundDetector(object):
     """
     Extracts foreground from a given image based on previous frames
     Take in the bgr images and print out the black and white
+    This guy is good for tracking motion
     """
     # TODO: Implement this
 
@@ -317,11 +374,11 @@ class NUIEngine(object):
         :param img:
         :return:
         """
-        # TODO: how to handle a bad detection which persists
+        # TODO: make a queue so that I average the last 5 values for angle and loc
+        # cuz right now it's too jumpy
         if self.face_position == None or self.count%25 == 0:
             #If I don't find a face I should probs just track ass opposed to wasting a frame
             self.count = 1
-            print("Detecting")
             # We initialize with no face, so we want to detect one
             # after that we will just track
             # This is assuming we never lose the face
@@ -347,7 +404,10 @@ class NUIEngine(object):
             #Show the skin back projection in another window
             # puts the contours onto the img, changes it
             skin_det = SkinDetector()
-            skin_det, skin_blobs, skin_colored =  skin_det.skin_contours(img, self.det_face_hsv,self.face_rect)
+            skin_det, skin_blobs, skin_colored, angles =  skin_det.skin_contours(img, self.det_face_hsv,self.face_rect)
+            if len(angles) == 3:
+                self.left_degrees = angles[1]
+                self.right_degrees = angles[2]
             cv2.namedWindow("skin_det")
             cv2.imshow("skin_det", skin_det)
             cv2.namedWindow("skin_blobs")

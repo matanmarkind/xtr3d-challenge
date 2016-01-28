@@ -113,7 +113,7 @@ class SkinDetector(object):
     """
     def skin_contours(self, img, det_face_hsv, face_rect):
         """
-        HOW CAN I SHOW THIS IN openCV????????????????????????/
+        Super Duper light sensitive
         :param img:
         :param det_face_hsv:
         :param face_rect:
@@ -122,15 +122,37 @@ class SkinDetector(object):
         masked_img = self.skin_mask(img, det_face_hsv, face_rect)
         blob_img = self.skin_blobs(img, det_face_hsv, face_rect, masked_img)
         contours, hierarchy = cv2.findContours(np.copy(blob_img), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = self.large_contours(contours, 3) #return the n largest contours up to 6
 
+        labeled_img = np.zeros(blob_img.shape + (3, ), np.uint8)
+        colors = ((0,0,255),(0,255,0),(255,0,0),(0,255,255),(255,0,255), (255, 255, 0))
+        pnts_list = []
+        mask_list = []
+        for ind, contour in enumerate(contours):
+            mask = np.zeros(blob_img.shape, np.uint8)
+            cv2.drawContours(mask, [contour], 0, 255, -1, 8)
+            pixel_points = cv2.findNonZero(mask)#(x,y)
+
+            labeled_img[mask == 255] = colors[ind]
+            pnts_list.append(pixel_points)
+            mask_list.append(mask)
+
+        _ = cv2.drawContours(blob_img, contours, -1, (128), 3)
+        return masked_img, blob_img, labeled_img
+
+    def large_contours(self, contours, n=5):
+        """
+        Return the n largest contours from mmy skin detection
+        :param contours:
+        :param n:  up to 8
+        :return:
+        """
         #calculate the area of the contours, and select the 5 largest blobs
         area = []
         for i, countour in enumerate(contours):
             area.append(cv2.moments(countour)['m00'])
-        contours = [contours[area.index(i)] for i in heapq.nlargest(5, area)]
-        print(len(contours))
-        _ = cv2.drawContours(blob_img, contours, -1, (128), 3)
-        return blob_img
+        return [contours[area.index(i)] for i in heapq.nlargest(n, area)]
+
 
     def skin_blobs(self, img, det_face_hsv, face_rect, masked_img):
         """
@@ -153,9 +175,9 @@ class SkinDetector(object):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (6, 6))
         kernel_big = kernel & np.transpose(kernel) #symmetry
         blob_img = cv2.erode(masked_img, kernel_small)
-        blob_img = cv2.dilate(masked_img, kernel_big)
-        blob_img = cv2.erode(masked_img, kernel_small)
-        blob_img = cv2.dilate(masked_img, kernel_big)
+        blob_img = cv2.dilate(blob_img, kernel_big)
+        blob_img = cv2.erode(blob_img, kernel_small)
+        blob_img = cv2.dilate(blob_img, kernel_big)
         return blob_img
 
 
@@ -184,13 +206,14 @@ class SkinDetector(object):
         cv2.normalize(hs_face_hist, hs_face_hist, 0, 255, cv2.NORM_MINMAX)
         #create a Hue-Saturation BackProjection, and a mask
         #This mask ignores dark pixels < 32, and saturated pixels, <60
-        mask = cv2.inRange(img_hsv, np.array((0., 60., 32.)), np.array((180., 255., 255.)))
+        hue_min, sat_min, val_min = 0.0, 32.0, 16.0
+        mask = cv2.inRange(img_hsv, np.array((hue_min, sat_min, val_min)), np.array((180., 255., 255.)))
         mask_face = mask[face_top:face_top+face_height, face_left:face_left+face_width]
         masked_hs_hist = cv2.calcHist([det_face_hsv], [0,1], mask_face, [32,32], [0, 180,0, 255])
         cv2.normalize(masked_hs_hist, masked_hs_hist, 0, 255, cv2.NORM_MINMAX)
         masked_hs_prob = cv2.calcBackProject([img_hsv], [0,1], masked_hs_hist, [0, 180,0, 255],1)
         cv2.bitwise_and(masked_hs_prob, mask, dst=masked_hs_prob) #seems to lessen noise???
-        thresh = 8 #threshold likelihood for being skin, changes a lot based on setting
+        thresh = 8.0 #threshold likelihood for being skin, changes a lot based on setting
         _, masked_img = cv2.threshold(masked_hs_prob, thresh, 255, cv2.CV_8U) #throw out below thresh
 
         return masked_img
@@ -296,6 +319,7 @@ class NUIEngine(object):
         """
         # TODO: how to handle a bad detection which persists
         if self.face_position == None or self.count%25 == 0:
+            #If I don't find a face I should probs just track ass opposed to wasting a frame
             self.count = 1
             print("Detecting")
             # We initialize with no face, so we want to detect one
@@ -323,9 +347,13 @@ class NUIEngine(object):
             #Show the skin back projection in another window
             # puts the contours onto the img, changes it
             skin_det = SkinDetector()
-            skin_blobs =  skin_det.skin_contours(img, self.det_face_hsv,self.face_rect)
+            skin_det, skin_blobs, skin_colored =  skin_det.skin_contours(img, self.det_face_hsv,self.face_rect)
+            cv2.namedWindow("skin_det")
+            cv2.imshow("skin_det", skin_det)
             cv2.namedWindow("skin_blobs")
             cv2.imshow("skin_blobs", skin_blobs)
+            cv2.namedWindow("skin_colored")
+            cv2.imshow("skin_colored", skin_colored)
 
 
 
